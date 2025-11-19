@@ -1,0 +1,3 @@
+[console_scripts]
+imu_pub = sensor.imu_pub:main
+
