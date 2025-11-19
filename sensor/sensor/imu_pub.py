@@ -6,36 +6,37 @@ import threading
 from queue import Queue
 from colorama import Fore, Style, init
 import os
-import csv # <--- جدید
-import sys # <--- اگرچه قبلا بود، برای دسترسی به متغیرها مفید است
+import csv
+import sys 
 
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 
-# ... (سایر تنظیمات)
+# ----------------------------------------------------------------
+# === تنظیمات اولیه و متغیرهای عمومی ===
+# ----------------------------------------------------------------
 init(autoreset=True) 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
-PROCESSING_INTERVAL_SEC = 1.0 
+PROCESSING_INTERVAL_SEC = 0.1 # فرکانس پردازش داده‌های بافرشده (10Hz)
 data_queue = Queue() 
 
 app = Flask(__name__)
+
 # ----------------------------------------------------------------
-# ... (تابع receive_data بدون تغییر)
+# === 1. سرور Flask: دریافت داده از سنسور ===
 # ----------------------------------------------------------------
 @app.route('/data', methods=['POST'])
 def receive_data():
-    # ... (کد تابع receive_data بدون تغییر)
-    # ... (همانند کد اصلی شما)
     try:
-        # ... (دریافت و پردازش داده ها)
         data_batch = request.json
         server_time = time.time() 
 
         if isinstance(data_batch, dict) and 'payload' in data_batch and isinstance(data_batch['payload'], list):
             sensor_list = data_batch['payload']
             
+            # متادیتایی که به هر رکورد اضافه می‌شود
             metadata = {
                 'server_received_timestamp': server_time, 
                 'messageId': data_batch.get('messageId', ''),
@@ -65,8 +66,9 @@ def receive_data():
     except Exception as e:
         logging.error(f"{Fore.RED}Error receiving data: {e}", exc_info=True)
         return 'Internal Server Error', 500
+
 # ----------------------------------------------------------------
-# 3. ROS 2 Node: Data Processor and Publisher
+# === 2. ROS 2 Node: پردازش و پابلیش ===
 # ----------------------------------------------------------------
 
 class DataPublisherNode(Node):
@@ -76,13 +78,15 @@ class DataPublisherNode(Node):
         self.publisher_ = self.create_publisher(String, 'imu_sensor_data_json', 10) 
         timer_period = PROCESSING_INTERVAL_SEC  
         self.timer = self.create_timer(timer_period, self.timer_callback)
-        self.get_logger().info(f"{Fore.CYAN}--- ROS 2 Publisher Started (1 Hz) on topic '/imu_sensor_data_json' ---")
+        self.get_logger().info(f"{Fore.CYAN}--- ROS 2 Publisher Started ({1/PROCESSING_INTERVAL_SEC} Hz) on topic '/imu_sensor_data_json' ---")
         
-        self.csv_file_path = '/home/dynamic/Robo/Try3/sensor/sensor/data/imu_data.csv'
+        self.csv_file_path = os.path.join(os.getcwd(), 'sensor/data/imu_data.csv') 
+        
         self.csv_header = [
             'time_of_publish', 'server_received_timestamp', 'sessionId', 'deviceId', 'messageId', 
             'accel_time', 'accel_accuracy', 'accel_x', 'accel_y', 'accel_z',
             'gyro_time', 'gyro_accuracy', 'gyro_x', 'gyro_y', 'gyro_z',
+            'mag_time', 'mag_accuracy', 'mag_x', 'mag_y', 'mag_z', # <--- اضافه شده
         ]
         self.setup_csv_file()
         self.get_logger().info(f"{Fore.CYAN}--- Logging to CSV file: {self.csv_file_path} ---")
@@ -90,12 +94,10 @@ class DataPublisherNode(Node):
     def setup_csv_file(self):
         """ایجاد دایرکتوری و نوشتن هدر در صورت عدم وجود فایل."""
         try:
-            # ایجاد دایرکتوری در صورت عدم وجود
             dir_name = os.path.dirname(self.csv_file_path)
-            if not os.path.exists(dir_name):
+            if dir_name and not os.path.exists(dir_name):
                 os.makedirs(dir_name)
                 
-            # اگر فایل وجود ندارد، آن را ایجاد کرده و هدر را بنویسید
             if not os.path.exists(self.csv_file_path):
                 with open(self.csv_file_path, mode='w', newline='') as file:
                     writer = csv.writer(file)
@@ -106,44 +108,46 @@ class DataPublisherNode(Node):
             sys.exit(1)
 
 
-    def write_to_csv(self, records_to_save, json_payload):
-        """ذخیره‌سازی تمام داده‌های فیلترشده در یک سطر واحد."""
+    def write_to_csv(self, records_to_save, json_payload, first_record):
+        """ذخیره‌سازی کامل داده‌ها در CSV (شامل متادیتای حذف شده از ROS 2)."""
         try:
             with open(self.csv_file_path, mode='a', newline='') as file:
                 writer = csv.writer(file)
                 
-                # --- مرحله ۱: آماده‌سازی داده‌ها ---
-                # ساخت یک دیکشنری برای ذخیره تمام داده‌های سطر
                 row_data = {key: '' for key in self.csv_header}
                 
                 # افزودن متادیتای اصلی
-                row_data['time_of_publish'] = json_payload.get('time_of_publish')
-                row_data['server_received_timestamp'] = json_payload.get('server_received_timestamp')
-                row_data['sessionId'] = json_payload.get('sessionId')
-                row_data['deviceId'] = json_payload.get('deviceId')
-                row_data['messageId'] = json_payload.get('messageId')
+                if first_record:
+                    row_data['sessionId'] = first_record.get('sessionId')
+                    row_data['deviceId'] = first_record.get('deviceId')
+                    row_data['messageId'] = first_record.get('messageId')
+                    row_data['server_received_timestamp'] = first_record.get('server_received_timestamp')
+                    # زمان پابلیش ROS 2
+                    row_data['time_of_publish'] = json_payload.get('time_of_publish')
                 
                 # افزودن داده‌های سنسور
                 for record in records_to_save:
-                    sensor_name = record.get('name', '').lower() # مثلاً: accelerometer
+                    sensor_name = record.get('name', '').lower()
                     values = record.get('values', {})
                     
-                    # فرض می‌کنیم نام‌های سنسور 'accelerometer' و 'gyroscope' باشند:
+                    prefix = None
                     if 'accel' in sensor_name:
                         prefix = 'accel'
                     elif 'gyro' in sensor_name:
                         prefix = 'gyro'
+                    elif 'mag' in sensor_name: # <--- مدیریت مغناطیس‌سنج
+                        prefix = 'mag'
                     else:
-                        continue # سنسور ناشناخته
+                        continue 
                     
+                    # داده‌هایی که در CSV ذخیره می‌شوند:
                     row_data[f'{prefix}_time'] = record.get('time')
                     row_data[f'{prefix}_accuracy'] = record.get('accuracy')
                     row_data[f'{prefix}_x'] = values.get('x')
                     row_data[f'{prefix}_y'] = values.get('y')
                     row_data[f'{prefix}_z'] = values.get('z')
 
-                # --- مرحله ۲: نوشتن سطر نهایی ---
-                # مطمئن می‌شویم که مقادیر به ترتیب هدر قرار می‌گیرند
+                # نوشتن سطر نهایی (ترتیب بر اساس self.csv_header)
                 final_row = [row_data[header] for header in self.csv_header]
                 writer.writerow(final_row)
                 
@@ -157,77 +161,80 @@ class DataPublisherNode(Node):
         
         if data_queue.empty():
             return
-        # ... (کد استخراج latest_sensor_list و selected_records_by_name بدون تغییر)
-        # ... (همانند کد اصلی شما)
+
         latest_sensor_list = None
-        server_time_of_latest_batch = None
         while not data_queue.empty():
             current_batch = data_queue.get_nowait()
             latest_sensor_list = current_batch
-            if current_batch:
-                server_time_of_latest_batch = current_batch[0].get('server_received_timestamp')
 
         if latest_sensor_list is None:
             return
         
+        # تنها آخرین رکورد از هر سنسور را انتخاب می‌کند
         selected_records_by_name = {}
         for record in latest_sensor_list:
             sensor_name = record.get('name')
             if sensor_name is None:
                 continue 
-            if sensor_name not in selected_records_by_name:
-                selected_records_by_name[sensor_name] = record
+            selected_records_by_name[sensor_name] = record
         
-        records_to_save = selected_records_by_name.values()
+        records_to_process = selected_records_by_name.values()
 
-        if not records_to_save:
+        if not records_to_process:
              self.get_logger().warn(f"{Fore.YELLOW}No valid records found in the latest sensor list to publish.")
              return 
         
+        # ----------------------------------------------------------------
+        # === ساختار Flat JSON برای ROS 2 ===
+        # ----------------------------------------------------------------
         json_payload = {}
         
-        # 1. افزودن متادیتای ثابت
-        first_record = next(iter(records_to_save), None)
+        # 1. افزودن متادیتای ضروری برای ROS 2
+        first_record = next(iter(records_to_process), None)
         if first_record:
-            json_payload['sessionId'] = first_record.get('sessionId', '')
-            json_payload['deviceId'] = first_record.get('deviceId', '')
-            json_payload['messageId'] = first_record.get('messageId', '')
-            json_payload['server_received_timestamp'] = first_record.get('server_received_timestamp', '')
+            json_payload['server_received_timestamp'] = first_record.get('server_received_timestamp', 0.0)
             json_payload['time_of_publish'] = time.time() # زمان پابلیش شدن نود
 
-        # 2. افزودن مقادیر تمام سنسورهای فیلترشده
-        json_payload['sensors'] = {}
-        for record in records_to_save:
-            sensor_name = record.get('name')
-            if not sensor_name: continue
+        # 2. افزودن مقادیر سنسورها به صورت مستقیم (فلت)
+        for record in records_to_process:
+            sensor_name = record.get('name', '').lower()
+            values = record.get('values', {})
             
-            sensor_data = {
-                'time': record.get('time', ''),
-                'accuracy': record.get('accuracy', ''),
-                'values': record.get('values', {})
-            }
-            json_payload['sensors'][sensor_name] = sensor_data
+            prefix = None
+            if 'accel' in sensor_name:
+                prefix = 'accel'
+            elif 'gyro' in sensor_name:
+                prefix = 'gyro'
+            elif 'mag' in sensor_name: # <--- مغناطیس‌سنج
+                prefix = 'mag'
+            else:
+                continue
+            
+            # فقط داده‌های حیاتی برای ROS 2: زمان و مقادیر X,Y,Z
+            json_payload[f'{prefix}_time'] = record.get('time', 0.0)
+            json_payload[f'{prefix}_x'] = values.get('x', 0.0)
+            json_payload[f'{prefix}_y'] = values.get('y', 0.0)
+            json_payload[f'{prefix}_z'] = values.get('z', 0.0)
         
-        # --- [جدید] ذخیره در CSV ---
-        self.write_to_csv(records_to_save, json_payload)
+        # 3. ذخیره در CSV (با داده‌های کامل)
+        self.write_to_csv(records_to_process, json_payload, first_record) 
         
-        # --- پابلیش در ROS 2 ---
+        # 4. پابلیش در ROS 2
         msg = String()
-        # تبدیل دیکشنری نهایی به رشته JSON
         msg.data = json.dumps(json_payload) 
         self.publisher_.publish(msg)
         
-        self.get_logger().info(f"{Fore.GREEN}PUBLISHED: Sensors={len(records_to_save)}, MessageID={json_payload.get('messageId', 'N/A')}")
-        self.get_logger().info(f"Published JSON size: {len(msg.data)} bytes")
+        self.get_logger().info(f"{Fore.GREEN}PUBLISHED: Sensors={len(records_to_process)}")
 
-# ... (توابع run_flask_app، run_ros_node، main و if __name__ == '__main__': بدون تغییر)
+# ----------------------------------------------------------------
+# === 3. توابع اجرا و نقطه شروع ===
+# ----------------------------------------------------------------
 
 def run_flask_app():
     """ تابع اجرای سرور Flask """
     logging.info("----------------------------------------------------------------")
     logging.info(f"{Fore.BLUE}Starting Flask server on http://0.0.0.0:5000/data ...")
     logging.info("----------------------------------------------------------------")
-    # debug=False و use_reloader=False ضروری است
     app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
 
 def run_ros_node():
@@ -235,7 +242,7 @@ def run_ros_node():
     rclpy.init(args=None)
     node = DataPublisherNode()
     try:
-        rclpy.spin(node) # نود را بلاک می‌کند و تایمرها را اجرا می‌کند
+        rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:

@@ -25,7 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'imu_pub = sensor.imu_pub:main',
-            'imu_filter = sensor.filter:main',
+            'imu_filter = sensor.imu_filter:main',
         ],
     },
 )
