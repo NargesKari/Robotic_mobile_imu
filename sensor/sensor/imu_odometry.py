@@ -7,22 +7,27 @@ from example_interfaces.msg import Float64MultiArray
 from geometry_msgs.msg import PoseStamped 
 from nav_msgs.msg import Path 
 from rclpy.clock import Clock
+import sys
 
-# کاهش اعتماد به شتاب‌سنج (برای جلوگیری از خطای Roll/Pitch هنگام حرکت)
+# --- Navigation and Filtering Constants ---
+# Reduced trust in the accelerometer (due to Roll/Pitch error during motion)
 COMPLEMENTARY_FILTER_TAU = 0.3 
+GRAVITY_CONSTANT = 9.81 
 
-# ZUPT (Linear Acceleration)
-ACCEL_THRESHOLD = 0.5 
-GYRO_THRESHOLD = 0.02
+# ZUPT (Zero Velocity Update) Thresholds (for Total Acceleration Data)
+ACCEL_THRESHOLD = 0.5  # Allowed extra acceleration when stationary
+GYRO_THRESHOLD = 0.02  # Allowed rotation when stationary
 PATH_PUBLISH_RATE = 0.5 
 
+# Low-Pass Filter on velocity to reduce accumulated noise
 VELOCITY_LPF_ALPHA = 0.8  
+# ---
 
 class ImuOdometryNode(Node):
     
     def __init__(self):
         super().__init__('imu_odometry_node')
-        self.get_logger().info('IMU Odometry Node Initialized for LINEAR ACCELERATION input.')
+        self.get_logger().info('IMU Odometry Node Initialized (Total Acceleration Assumption).')
 
         self.subscription = self.create_subscription(
             Float64MultiArray,  
@@ -33,6 +38,7 @@ class ImuOdometryNode(Node):
         self.pose_publisher = self.create_publisher(PoseStamped, 'imu_odometry_pose', 10)
         self.path_publisher = self.create_publisher(Path, 'imu_traversed_path', 10)
         
+        # --- Internal State ---
         self.roll = 0.0
         self.pitch = 0.0
         self.yaw = 0.0
@@ -44,20 +50,20 @@ class ImuOdometryNode(Node):
 
     
     def imu_filtered_callback(self, msg):
-        """ محاسبه Odometry و ذخیره مختصات در تاریخچه مسیر """
+        """ Calculate Odometry and store coordinates in path history """
         if len(msg.data) < 10: return
 
-        accel_body = np.array(msg.data[0:3]) # Linear Acceleration (گرانش حذف شده)
+        accel_body = np.array(msg.data[0:3]) # Total Acceleration (final assumption)
         gyro_rate = np.array(msg.data[3:6])
         dt = msg.data[9]
         if dt <= 0.0: return
             
-        # ۱. تخمین جهت (Orientation Estimation) - فیلتر مکمل
-        # توجه: این بخش همچنان نیاز به Total Acceleration دارد
-        # اما چون Total Accel نداریم، از همین داده‌های Linear استفاده می‌کنیم (یک ضعف ذاتی روش)
+        # 1. Orientation Estimation
+        # Roll/Pitch is calculated using gravity (Total Accel)
         accel_roll = math.atan2(accel_body[1], accel_body[2])
         accel_pitch = math.atan2(-accel_body[0], math.sqrt(accel_body[1]**2 + accel_body[2]**2)) 
         
+        # Prediction with gyroscope
         roll_dot = gyro_rate[0] + math.sin(self.roll) * math.tan(self.pitch) * gyro_rate[1] + math.cos(self.roll) * math.tan(self.pitch) * gyro_rate[2]
         pitch_dot = math.cos(self.roll) * gyro_rate[1] - math.sin(self.roll) * gyro_rate[2]
         yaw_dot = math.sin(self.roll) / math.cos(self.pitch) * gyro_rate[1] + math.cos(self.roll) / math.cos(self.pitch) * gyro_rate[2]
@@ -66,47 +72,46 @@ class ImuOdometryNode(Node):
         gyro_pitch = self.pitch + pitch_dot * dt
         self.yaw = self.yaw + yaw_dot * dt 
         
+        # Combination with Complementary Filter (Reduced trust in accelerometer)
         alpha = COMPLEMENTARY_FILTER_TAU / (COMPLEMENTARY_FILTER_TAU + dt)
         self.roll = alpha * gyro_roll + (1 - alpha) * accel_roll
         self.pitch = alpha * gyro_pitch + (1 - alpha) * accel_pitch
         
         
-        # ۲. تخمین موقعیت (Position Estimation)
+        # 2. Position Estimation
         R = self.create_rotation_matrix()
-        # دوران Linear Accel به World Frame
-        accel_world = R @ accel_body 
+        accel_world = R @ accel_body # Rotate Total Accel to World Frame
         
-        # --- ZUPT (Zero Velocity Update) Logic for LINEAR ACCELERATION ---
-        # توجه: گرانش قبلاً حذف شده است. بزرگی باید نزدیک صفر باشد.
+        # --- ZUPT (Zero Velocity Update) Logic for TOTAL ACCELERATION ---
         accel_magnitude = np.linalg.norm(accel_body)
         gyro_magnitude = np.linalg.norm(gyro_rate)
 
-        # محاسبه سرعت پیش‌بینی شده قبل از ZUPT
+        # Calculate predicted velocity before ZUPT
         predicted_velocity = self.velocity + accel_world * dt
         
-        # شرط سکون: اگر بزرگی شتاب خطی و چرخش کم باشد.
-        if accel_magnitude < ACCEL_THRESHOLD and gyro_magnitude < GYRO_THRESHOLD:
+        # Static condition: If total acceleration magnitude is close to 9.81 and rotation is low.
+        if abs(accel_magnitude - GRAVITY_CONSTANT) < ACCEL_THRESHOLD and gyro_magnitude < GYRO_THRESHOLD:
             
             self.get_logger().debug("STATIC DETECTED - ZUPT applied.")
             
-            accel_world[:] = 0.0 # شتاب را در World Frame صفر کن
-            self.velocity[:] = 0.0 # صفر کردن سرعت در حالت سکون
+            accel_world[:] = 0.0
+            self.velocity[:] = 0.0 # Set velocity to zero during stationary state
             
         else:
-            # حرکت: نیازی به حذف گرانش نیست (چون داده ورودی تمیز است)
-            pass 
+            # Motion: Remove gravity (since it was Total Accel)
+            accel_world[2] = accel_world[2] - GRAVITY_CONSTANT 
 
-            # انتگرال‌گیری سرعت
+            # Velocity integration
             self.velocity += accel_world * dt
             
-            # --- اعمال فیلتر پایین‌گذر بر روی سرعت ---
+            # --- Apply Low-Pass Filter on Velocity ---
             self.velocity = VELOCITY_LPF_ALPHA * self.velocity + (1 - VELOCITY_LPF_ALPHA) * predicted_velocity
             
-        # انتگرال‌گیری موقعیت
+        # Position integration
         self.position += self.velocity * dt
         
         
-        # ۳. ذخیره و انتشار مختصات
+        # 3. Store and Publish Coordinates
         pose_msg = self.create_pose_message()
         self.path_history.append(pose_msg)
         self.pose_publisher.publish(pose_msg)
@@ -114,6 +119,7 @@ class ImuOdometryNode(Node):
 
 
     def create_rotation_matrix(self):
+        """Create the Body to World rotation matrix (Z-Y-X Convention)"""
         c_r, s_r = math.cos(self.roll), math.sin(self.roll)
         c_p, s_p = math.cos(self.pitch), math.sin(self.pitch)
         c_y, s_y = math.cos(self.yaw), math.sin(self.yaw)
@@ -127,14 +133,21 @@ class ImuOdometryNode(Node):
 
     
     def create_pose_message(self):
+        """Create and return a PoseStamped message from the current position and orientation"""
         msg = PoseStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'world'
         
+        # Position
         msg.pose.position.x = self.position[0]
         msg.pose.position.y = self.position[1]
-        msg.pose.position.z = self.position[2]
-
+        
+        # Major change: Remove Z-axis from path display in RViz
+        # The actual self.position[2] value is preserved in internal calculations, 
+        # but is set to zero in the output message for RViz.
+        msg.pose.position.z = 0.0 
+        
+        # Convert Roll/Pitch/Yaw to Quaternion (for Pose message)
         cy = math.cos(self.yaw * 0.5)
         sy = math.sin(self.yaw * 0.5)
         cp = math.cos(self.pitch * 0.5)
@@ -150,6 +163,7 @@ class ImuOdometryNode(Node):
         return msg
 
     def publish_path_history(self):
+        """Publish the accumulated path history as a nav_msgs/Path message"""
         if not self.path_history:
             return
 
@@ -163,6 +177,7 @@ class ImuOdometryNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
+    
     try:
         import numpy as np
     except ImportError:

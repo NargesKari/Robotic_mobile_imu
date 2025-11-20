@@ -14,7 +14,6 @@ GRAVITY_CONSTANT = 9.81
 CALIBRATION_SAMPLES = 25 
 MAX_CALIBRATION_DURATION = 30.0 
 
-
 class ImuFilterNode(Node):
     
     def __init__(self):
@@ -109,8 +108,12 @@ class ImuFilterNode(Node):
 
         self.gyro_bias = gyro_avg.tolist()
         self.mag_bias = mag_avg.tolist()
-        self.accel_bias = accel_avg.tolist() 
+        
+        accel_bias_z = accel_avg[2] #- GRAVITY_CONSTANT 
 
+        self.accel_bias = [accel_avg[0], accel_avg[1], accel_bias_z]
+        # ------------------------------------------------------------
+        
         self.get_logger().info(f'CALIBRATION SUCCESS: Samples={sample_count}')
         self.get_logger().info(f'Gyro Bias (dps): {self.gyro_bias}')
         self.get_logger().info(f'Accel Bias (m/s^2): {self.accel_bias}')
@@ -118,7 +121,7 @@ class ImuFilterNode(Node):
     
     
     def apply_low_pass_filter(self, raw_data, previous_filtered_data, alpha):
-        """اعمال LPF با آلفای محاسبه شده دینامیک"""
+        """اعمال با آلفای محاسبه شده"""
         filtered_data = []
         for i in range(3):
             filtered_value = alpha * raw_data[i] + (1.0 - alpha) * previous_filtered_data[i]
@@ -127,7 +130,7 @@ class ImuFilterNode(Node):
 
     
     def imu_callback(self, msg):
-        """ کال‌بک اصلی: اعمال بایاس‌های محاسبه شده و فیلتر LPF دینامیک """
+        """ اعمال بایاس‌های محاسبه شده و فیلتر """
         current_time = self.get_clock().now().nanoseconds / 1e9
         dt = current_time - self.last_time
         self.last_time = current_time
@@ -139,6 +142,7 @@ class ImuFilterNode(Node):
         try:
             data_dict = json.loads(msg.data)
             
+            # --- اعمال بایاس‌های محاسبه شده خودکار ---
             accel_raw = [
                 data_dict.get('accel_x', 0.0) - self.accel_bias[0], 
                 data_dict.get('accel_y', 0.0) - self.accel_bias[1], 
@@ -169,7 +173,6 @@ class ImuFilterNode(Node):
         
         filtered_msg = Float64MultiArray()
         
-        #  [Ax, Ay, Az, Gx, Gy, Gz, Mx, My, Mz, dt]
         filtered_msg.data = (
             self.accel_filtered + 
             self.gyro_filtered + 
