@@ -26,6 +26,7 @@ setup(
         'console_scripts': [
             'imu_pub = sensor.imu_pub:main',
             'imu_filter = sensor.imu_filter:main',
+            'imu_odometry = sensor.imu_odometry:main',
         ],
     },
 )
