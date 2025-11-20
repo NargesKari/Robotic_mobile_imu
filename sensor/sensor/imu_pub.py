@@ -17,7 +17,7 @@ from std_msgs.msg import String
 init(autoreset=True) 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
-PROCESSING_INTERVAL_SEC = 0.1 # فرکانس پردازش داده‌های بافرشده (10Hz)
+PROCESSING_INTERVAL_SEC = 0.1 
 data_queue = Queue() 
 
 app = Flask(__name__)
@@ -207,14 +207,12 @@ class DataPublisherNode(Node):
 # ----------------------------------------------------------------
 
 def run_flask_app():
-    """ تابع اجرای سرور Flask """
     logging.info("----------------------------------------------------------------")
     logging.info(f"{Fore.BLUE}Starting Flask server on http://0.0.0.0:5000/data ...")
     logging.info("----------------------------------------------------------------")
     app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
 
 def run_ros_node():
-    """ تابع اجرای نود ROS 2 """
     rclpy.init(args=None)
     node = DataPublisherNode()
     try:
